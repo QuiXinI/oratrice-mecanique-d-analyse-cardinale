@@ -1,0 +1,5 @@
+dotenv~=0.9.9
+python-dotenv~=1.1.0
+Pyrogram~=2.0.106
+Booktype~=1.5
+aioredis~=2.0.1
