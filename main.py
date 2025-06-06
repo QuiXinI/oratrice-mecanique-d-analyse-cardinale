@@ -133,9 +133,9 @@ async def schedule_unmute(app: Client, chat_id: int, user_id: int, unmute_ts: in
         username = user.username
 
         if username:
-            await app.send_message(chat_id, f"@{username} размучен автоматически в {chat_link}.")
+            await app.send_message(chat_id, f"@{username} размучен автоматически.")
         else:
-            await app.send_message(chat_id, f"Пользователь [ID:{user_id}] размучен автоматически в {chat_link}.")
+            await app.send_message(chat_id, f"Пользователь [ID:{user_id}] размучен автоматически.")
     except RPCError:
         pass
     try:
@@ -169,20 +169,20 @@ async def help_handler(client, message):
     role = get_role(chat_id, sender_id)
     text = "Доступные команды:\n"
     text += "/help — показать список команд\n"
-    text += "/report [сообщение] — отправить сообщение модераторам/админам/владельцу/QuiXinI\n"
+    text += "/report [сообщение] — отправить сообщение модераторам/админам/владельцам\n\n"
     if role >= 1:
-        text += "/kick @username [причина] — кикнуть пользователя\n"
-        text += "/mute @username [время] — замутить пользователя\n"
-        text += "/unmute @username — размутить пользователя\n"
+        text += "/kick @username [причина] — кикнуть пользователя\n\n"
+        text += "/mute @username [время: `число` (минуты) или `число`s\m\h\d\w] — замутить пользователя\n\n"
+        text += "/unmute @username — размутить пользователя\n\n"
     if role == 2:
-        text += "/promote @username 1 — назначить Модератора\n"
-        text += "/demote @username — снять роль Модератора\n"
+        text += "/promote @username 1 — назначить Модератора\n\n"
+        text += "/demote @username — снять роль Модератора\n\n"
     elif role == 3:
-        text += "/promote @username [1-3] — назначить Модератора, Админа или Владельца\n"
-        text += "/demote @username — снять Модератора, Админа или Владельца\n"
+        text += "/promote @username [1-3] — назначить Модератора, Админа или Владельца\n\n"
+        text += "/demote @username — снять Модератора, Админа или Владельца\n\n"
     elif role == 4:
-        text += "/promote @username [1-4] — назначить любую роль\n"
-        text += "/demote @username — снять любую роль\n"
+        text += "/promote @username [1-4] — назначить любую роль\n\n"
+        text += "/demote @username — снять любую роль\n\n"
     await message.reply(text)
 
 # ------------- ПРИВЕТСТВИЕ ПРИ ВХОДЕ -------------
@@ -192,7 +192,7 @@ async def greet_new_users(client, message):
         try:
             await client.send_message(new_user.id, f"Ты присоединился к чату '{message.chat.title}'. Добро пожаловать!")
         except RPCError:
-            await message.reply(f"Добро пожаловать, {new_user.mention}! Напиши мне в ЛС, чтобы получить приветствие.")
+            await message.reply(f"Добро пожаловать, {new_user.mention}! Напиши мне в ЛС, чтобы получать уведомления.")
 
 # ------------- ПАРСЕР ВРЕМЕНИ -------------
 def parse_duration(text: str) -> int:
@@ -257,7 +257,7 @@ async def report_handler(client, message):
                 pass
 
     if not mentions:
-        await message.reply("Нет активных модераторов/админов/владельца/QuiXinI.")
+        await message.reply("Нет активных модераторов/админов/владельцев.")
         return
 
     ping_list = " ".join(mentions)
