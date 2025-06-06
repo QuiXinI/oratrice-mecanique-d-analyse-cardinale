@@ -1,19 +1,20 @@
 import asyncio
-import json
 import os
 import time
 import logging
-from datetime import datetime, timezone, timedelta
+import sqlite3
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from pyrogram import Client, filters
-from pyrogram.types import ChatPermissions, User, MessageEntity
+from pyrogram.types import ChatPermissions
 from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
 
 # --------- ПУТЬ К РЕСУРСАМ ---------
 RESOURCES_DIR = "resources"
 os.makedirs(RESOURCES_DIR, exist_ok=True)
+DB_PATH = os.path.join(RESOURCES_DIR, "bot.db")
 
 # ------------- НАСТРОЙКА ЛОГИРОВАНИЯ -------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,73 +36,116 @@ if not os.path.isfile(config_path):
     logging.error(f"Не найден файл конфигурации: {config_path}")
     exit(1)
 with open(config_path, "r", encoding="utf-8") as f:
-    config = json.load(f)
+    config = __import__('json').load(f)
 
-ADMINS_FILE = os.path.join(RESOURCES_DIR, config.get("admins_file", "admins.json"))
-MUTES_FILE = os.path.join(RESOURCES_DIR, config.get("mutes_file", "mutes.json"))
-LOGS_FILE = os.path.join(RESOURCES_DIR, config.get("logs_file", "logs.json"))
 DEFAULT_MUTE_SECONDS = config.get("default_mute_seconds", 600)
 LOG_CHAT_ID = config.get("log_chat_id", 0)
 
-# ------------- УТИЛИТЫ ДЛЯ JSON -------------
-def load_json(path):
-    if not os.path.isfile(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({}, f)
-    with open(path, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            logging.warning(f"Не удалось прочитать JSON из {path}, создаю пустой.")
-            return {}
+# ------------- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ -------------
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Таблица админов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    # Таблица мутов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mutes (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            unmute_ts INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    # Таблица логов
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_id INTEGER NOT NULL,
+            time_ts INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            by_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
 
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-# ------------- ГЛОБАЛЬНЫЕ СЛОВАРИ -------------
-all_admins = load_json(ADMINS_FILE)
-mutes = load_json(MUTES_FILE)
-logs = load_json(LOGS_FILE)
-
-# ------------- ПОМОЩНИК ДЛЯ ЧАТОВ -------------
-def ensure_chat(chat_id: int):
-    global all_admins, mutes
-    key = str(chat_id)
-    if key not in all_admins:
-        all_admins[key] = {}
-        save_json(ADMINS_FILE, all_admins)
-        all_admins = load_json(ADMINS_FILE)
-        logging.info(f"Создан раздел админов для чата {chat_id}")
-    if key not in mutes:
-        mutes[key] = {}
-        save_json(MUTES_FILE, mutes)
-        mutes = load_json(MUTES_FILE)
-        logging.info(f"Создан раздел мутов для чата {chat_id}")
+# Создаём или открываем БД
+conn = init_db()
 
 # ------------- ФУНКЦИИ ДЛЯ РОЛЕЙ -------------
 def get_role(chat_id: int, user_id: int) -> int:
-    ensure_chat(chat_id)
-    return all_admins.get(str(chat_id), {}).get(str(user_id), 0)
+    cursor = conn.execute(
+        "SELECT role FROM admins WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+    )
+    row = cursor.fetchone()
+    return row[0] if row else 0
 
-
+# Преобразование роли в строку
 def role_to_str(role: int) -> str:
-    return {1: "Модератор", 2: "Админ", 3: "Владелец", 4: "Его Фуррейшество QuiXinI"}.get(role, "Пользователь")
+    mapping = {
+        0: "Пользователь",
+        1: "Модератор",
+        2: "Админ",
+        3: "Владелец",
+        4: "Основатель"
+    }
+    return mapping.get(role, "Неизвестно")
+
+def set_role(chat_id: int, user_id: int, role: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO admins (chat_id, user_id, role) VALUES (?, ?, ?)",
+        (chat_id, user_id, role)
+    )
+    conn.commit()
+
+def del_role(chat_id: int, user_id: int):
+    conn.execute(
+        "DELETE FROM admins WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+    )
+    conn.commit()
+
+
+# ------------- МУТЫ -------------
+def add_mute(chat_id: int, user_id: int, unmute_ts: int):
+    conn.execute(
+        "INSERT OR REPLACE INTO mutes (chat_id, user_id, unmute_ts) VALUES (?, ?, ?)",
+        (chat_id, user_id, unmute_ts)
+    )
+    conn.commit()
+
+def del_mute(chat_id: int, user_id: int):
+    conn.execute(
+        "DELETE FROM mutes WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+    )
+    conn.commit()
+
+def get_all_mutes():
+    cursor = conn.execute("SELECT chat_id, user_id, unmute_ts FROM mutes")
+    return cursor.fetchall()
 
 # ------------- ЛОГИРОВАНИЕ -------------
 def log_action(target_id: int, action: str, by_id: int, chat_id: int):
-    entry = {
-        "time": int(time.time()),
-        "action": action,
-        "by": by_id,
-        "chat_id": chat_id
-    }
-    user_logs = logs.get(str(target_id), [])
-    user_logs.append(entry)
-    logs[str(target_id)] = user_logs
-    save_json(LOGS_FILE, logs)
+    now_ts = int(time.time())
+    conn.execute(
+        "INSERT INTO logs (target_id, time_ts, action, by_id, chat_id) VALUES (?, ?, ?, ?, ?)",
+        (target_id, now_ts, action, by_id, chat_id)
+    )
+    conn.commit()
     logging.info(f"Записано действие для {target_id}: {action} от {by_id} в чате {chat_id}")
+
+def get_user_logs(target_id: int):
+    cursor = conn.execute(
+        "SELECT time_ts, action FROM logs WHERE target_id = ? ORDER BY time_ts DESC", (target_id,)
+    )
+    return cursor.fetchall()
 
 # ------------- ФОНОВАЯ ФУНКЦИЯ ДЛЯ РАЗМЮТА -------------
 async def schedule_unmute(app: Client, chat_id: int, user_id: int, unmute_ts: int):
@@ -120,18 +164,10 @@ async def schedule_unmute(app: Client, chat_id: int, user_id: int, unmute_ts: in
         logging.info(f"Размутил {user_id} в чате {chat_link}")
     except RPCError as e:
         logging.warning(f"Не удалось размутить {user_id} в чате {chat_link}: {e}")
-    ensure_chat(chat_id)
-    chat_mutes = mutes.get(str(chat_id), {})
-    if str(user_id) in chat_mutes:
-        del chat_mutes[str(user_id)]
-        mutes[str(chat_id)] = chat_mutes
-        save_json(MUTES_FILE, mutes)
-        logging.info(f"Удалён {user_id} из списка мутов чата {chat_link}")
-    chat_link = f"[Чатнейм](tg://chat?id={chat_id})"
+    del_mute(chat_id, user_id)
     try:
         user = await app.get_users(user_id)
         username = user.username
-
         if username:
             await app.send_message(chat_id, f"@{username} размучен автоматически.")
         else:
@@ -143,21 +179,17 @@ async def schedule_unmute(app: Client, chat_id: int, user_id: int, unmute_ts: in
     except RPCError:
         pass
 
-# Функция для очистки логов
+# ------------- ФУНКЦИЯ ДЛЯ ОЧИСТКИ ЛОГОВ -------------
 async def cleanup_logs():
     while True:
-        now = time.time()
-        backup_logs = {}
-        for target_id, user_logs in logs.items():
-            updated_logs = [log for log in user_logs if now - log["time"] <= 48 * 3600]
-            backup_logs[target_id] = [log for log in user_logs if 48 * 3600 < now - log["time"] <= 96 * 3600]
-            logs[target_id] = updated_logs
-        save_json(LOGS_FILE, logs)
-        save_json(os.path.join(RESOURCES_DIR, "backup_logs.json"), backup_logs)
-        await asyncio.sleep(3600)  # Запуск очистки каждый час
+        now = int(time.time())
+        cutoff = now - 48 * 3600
+        # Удаляем записи старше 48 часов
+        conn.execute("DELETE FROM logs WHERE time_ts <= ?", (cutoff,))
+        conn.commit()
+        await asyncio.sleep(3600)
 
 # ------------- ИНИЦИАЛИЗАЦИЯ КЛИЕНТА -------------
-# Сессия будет храниться в resources/admin_bot.session
 session_path = os.path.join(RESOURCES_DIR, "admin_bot")
 app = Client(session_path, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -167,12 +199,12 @@ async def help_handler(client, message):
     chat_id = message.chat.id
     sender_id = message.from_user.id
     role = get_role(chat_id, sender_id)
-    text = "Доступные команды:\n"
-    text += "/help — показать список команд\n"
+    text = "Доступные команды:\n\n"
+    text += "/help — показать список команд\n\n"
     text += "/report [сообщение] — отправить сообщение модераторам/админам/владельцам\n\n"
     if role >= 1:
         text += "/kick @username [причина] — кикнуть пользователя\n\n"
-        text += "/mute @username [время: `число` (минуты) или `число`s\m\h\d\w] — замутить пользователя\n\n"
+        text += "/mute @username [время: `число` (минуты) или `число`s\\m\\h\\d\\w] — замутить пользователя\n\n"
         text += "/unmute @username — размутить пользователя\n\n"
     if role == 2:
         text += "/promote @username 1 — назначить Модератора\n\n"
@@ -245,13 +277,12 @@ async def report_handler(client, message):
             await message.reply("Используй: /report в ответ на сообщение или /report @username [сообщение]")
             return
 
-    ensure_chat(chat_id)
-    chat_admins = all_admins.get(str(chat_id), {})
+    chat_admins = conn.execute("SELECT user_id, role FROM admins WHERE chat_id = ?", (chat_id,)).fetchall()
     mentions = []
-    for uid_str, role_int in chat_admins.items():
+    for uid, role_int in chat_admins:
         if role_int >= 1:
             try:
-                user = await client.get_users(int(uid_str))
+                user = await client.get_users(uid)
                 mentions.append(f"@{user.username}" if user.username else f"[{user.first_name}](tg://user?id={user.id})")
             except RPCError:
                 pass
@@ -265,15 +296,13 @@ async def report_handler(client, message):
     reported_link = f"[{reported_user.first_name}](tg://user?id={reported_user.id})"
     header = f"{reporter_link} зарепортил(а) {reported_link}"
 
-    await message.reply(f"{header}\n{content}\nВнимание: {ping_list}")
+    await message.reply(f"{header}\n> {content}\nВнимание: {ping_list}")
 
 # ------------- ХАНДЛЕР ДЛЯ /promote -------------
 @app.on_message(filters.command("promote") & filters.group)
 async def promote_handler(client, message):
-    global all_admins
     chat_id = message.chat.id
     sender = message.from_user
-    ensure_chat(chat_id)
     args = message.text.split()
     if len(args) < 3:
         await message.reply("Используй: /promote @username уровень")
@@ -308,9 +337,7 @@ async def promote_handler(client, message):
         else:
             await message.reply(f"Нельзя: цель — {role_to_str(target_role)}, а вы — {role_to_str(sender_role)}.")
         return
-    all_admins[str(chat_id)][str(target_user.id)] = new_role
-    save_json(ADMINS_FILE, all_admins)
-    all_admins = load_json(ADMINS_FILE)
+    set_role(chat_id, target_user.id, new_role)
     await message.reply(f"{args[1]} теперь {role_to_str(new_role)}.")
     log_action(target_user.id, f"повышение до {new_role}", sender.id, chat_id)
     try:
@@ -322,10 +349,8 @@ async def promote_handler(client, message):
 # ------------- ХАНДЛЕР ДЛЯ /demote -------------
 @app.on_message(filters.command("demote") & filters.group)
 async def demote_handler(client, message):
-    global all_admins
     chat_id = message.chat.id
     sender = message.from_user
-    ensure_chat(chat_id)
     args = message.text.split()
     if len(args) < 2:
         await message.reply("Используй: /demote @username")
@@ -358,9 +383,7 @@ async def demote_handler(client, message):
         else:
             await message.reply(f"Нельзя: цель — {role_to_str(target_role)}, а вы — {role_to_str(sender_role)}.")
         return
-    del all_admins[str(chat_id)][str(target_user.id)]
-    save_json(ADMINS_FILE, all_admins)
-    all_admins = load_json(ADMINS_FILE)
+    del_role(chat_id, target_user.id)
     await message.reply(f"{args[1]} понижен(а).)")
     log_action(target_user.id, "понижение", sender.id, chat_id)
     try:
@@ -374,7 +397,6 @@ async def demote_handler(client, message):
 async def kick_handler(client, message):
     chat_id = message.chat.id
     sender = message.from_user
-    ensure_chat(chat_id)
     args = message.text.split(maxsplit=2)
     if len(args) < 2:
         await message.reply("Используй: /kick @username [причина]")
@@ -405,14 +427,13 @@ async def kick_handler(client, message):
     except RPCError as e:
         await message.reply(f"Не смог кикнуть: {e}")
         return
-    chat_link = f"[{message.chat.title}](tg://chat?id={chat_id})"
     if reason:
         reply_text = f"{args[1]} кикнут(а) по причине \"{reason}\""
-        user_text = f"Ты кикнут(а) из {chat_link} по причине \"{reason}\""
+        user_text = f"Ты кикнут(а) из [чат](tg://chat?id={chat_id}) по причине \"{reason}\""
         log_action(target_user.id, f"кик по причине {reason}", sender.id, chat_id)
     else:
         reply_text = f"{args[1]} кикнут(а)"
-        user_text = f"Ты кикнут(а) из {chat_link}"
+        user_text = f"Ты кикнут(а) из [чат](tg://chat?id={chat_id})"
         log_action(target_user.id, "кик без причины", sender.id, chat_id)
     await message.reply(reply_text)
     try:
@@ -425,7 +446,6 @@ async def kick_handler(client, message):
 async def mute_handler(client, message):
     chat_id = message.chat.id
     sender = message.from_user
-    ensure_chat(chat_id)
     args = message.text.split()
     if len(args) < 2:
         await message.reply("Используй: /mute @username [время]")
@@ -466,8 +486,7 @@ async def mute_handler(client, message):
     except RPCError as e:
         await message.reply(f"Не смог замутить: {e}")
         return
-    mutes[str(chat_id)][str(target_user.id)] = unmute_ts
-    save_json(MUTES_FILE, mutes)
+    add_mute(chat_id, target_user.id, unmute_ts)
     chat_link = f"[{message.chat.title}](tg://chat?id={chat_id})"
     until_str = until_date_dt.strftime("%Y-%m-%d %H:%M UTC")
     await message.reply(f"{args[1]} замучен(а) до {until_str}.")
@@ -483,7 +502,6 @@ async def mute_handler(client, message):
 async def unmute_handler(client, message):
     chat_id = message.chat.id
     sender = message.from_user
-    ensure_chat(chat_id)
     args = message.text.split()
     if len(args) < 2:
         await message.reply("Используй: /unmute @username")
@@ -519,15 +537,11 @@ async def unmute_handler(client, message):
     except RPCError as e:
         await message.reply(f"Не смог размутить: {e}")
         return
-    chat_mutes = mutes.get(str(chat_id), {})
-    if str(target_user.id) in chat_mutes:
-        del chat_mutes[str(target_user.id)]
-        mutes[str(chat_id)] = chat_mutes
-        save_json(MUTES_FILE, mutes)
+    del_mute(chat_id, target_user.id)
     await message.reply(f"{args[1]} размучен(а).)")
     log_action(target_user.id, "размутил", sender.id, chat_id)
-    chat_link = f"[{message.chat.title}](tg://chat?id={chat_id})"
     try:
+        chat_link = f"[{message.chat.title}](tg://chat?id={chat_id})"
         await client.send_message(target_user.id, f"Ты размучен(а) в {chat_link}.", parse_mode=ParseMode.MARKDOWN)
     except RPCError:
         pass
@@ -549,14 +563,13 @@ async def logs_handler(client, message):
     except RPCError:
         await message.reply("Не могу найти пользователя.")
         return
-    user_logs = logs.get(str(target_user.id), [])
+    user_logs = get_user_logs(target_user.id)
     if not user_logs:
         await message.reply("У этого пользователя нет записей в логах.")
         return
     text = f"Логи для {args[1]}:\n"
-    for entry in user_logs:
-        t = datetime.fromtimestamp(entry["time"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        action = entry["action"]
+    for time_ts, action in user_logs:
+        t = datetime.fromtimestamp(time_ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         text += f"{t} — {action}\n"
     try:
         await client.send_message(sender.id, text)
@@ -567,21 +580,16 @@ async def logs_handler(client, message):
 # ------------- СТАРТ БОТА -------------
 if __name__ == "__main__":
     now_ts = int(time.time())
-    ensure_chat(0)
-    for chat_id_str, users in mutes.items():
-        for uid_str, unmute_ts in users.items():
-            user_id = int(uid_str)
-            chat_id = int(chat_id_str)
-            if unmute_ts <= now_ts:
-                asyncio.get_event_loop().create_task(schedule_unmute(app, chat_id, user_id, now_ts))
-            else:
-                asyncio.get_event_loop().create_task(schedule_unmute(app, chat_id, user_id, unmute_ts))
+    # Восстанавливаем незавершённые мьюты
+    for chat_id, user_id, unmute_ts in get_all_mutes():
+        if unmute_ts <= now_ts:
+            asyncio.get_event_loop().create_task(schedule_unmute(app, chat_id, user_id, now_ts))
+        else:
+            asyncio.get_event_loop().create_task(schedule_unmute(app, chat_id, user_id, unmute_ts))
 
     # Запуск задачи очистки логов внутри цикла событий Pyrogram
     async def cleanup_task():
-        while True:
-            await cleanup_logs()
-            await asyncio.sleep(3600*48)  # Ожидание перед следующей очисткой
+        await cleanup_logs()
 
     app.run()
     app.create_task(cleanup_task())
