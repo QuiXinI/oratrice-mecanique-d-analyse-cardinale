@@ -224,7 +224,12 @@ async def greet_new_users(client, message):
         try:
             await client.send_message(new_user.id, f"Ты присоединился к чату '{message.chat.title}'. Добро пожаловать!")
         except RPCError:
-            await message.reply(f"Добро пожаловать, {new_user.mention}! Напиши мне в ЛС, чтобы получать уведомления.")
+            await message.reply_photo(
+                photo=f"{RESOURCES_DIR}/greeting.jpg",  # относительный путь или абсолютный
+                caption=f"Добро пожаловать, {new_user.mention}! Напиши мне в ЛС, чтобы получать уведомления."
+            )
+            # await message.reply(f"Добро пожаловать, {new_user.mention}! Напиши мне в ЛС, чтобы получать уведомления.")
+
 
 # ------------- ПАРСЕР ВРЕМЕНИ -------------
 def parse_duration(text: str) -> int:
