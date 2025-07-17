@@ -2,5 +2,6 @@
   "admins_file": "admins.json",
   "mutes_file": "mutes.json",
   "default_mute_seconds": 600,
-  "log_chat_id": 0
+  "log_chat_id": 0,
+  "whore": "just a test"
 }
