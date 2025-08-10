@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import ChatPermissions
 from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
@@ -79,36 +79,26 @@ def init_db():
 # Создаём или открываем БД
 conn = init_db()
 
-# Класс для отслеживания запросов
+# Класс для отслеживания запросов (остался на случай, если захочешь вернуть подтверждения)
 class RequestTracker:
     def __init__(self):
-        self.clear_requests = {}
-        self.whorebot_requests = {}
+        # структура: { (command_type, message_id) : [ (user_id, timestamp), ... ] }
+        self.requests = {}
 
-    def add_request(self, command_type, message_id, timestamp):
-        if command_type == "clear":
-            if message_id not in self.clear_requests:
-                self.clear_requests[message_id] = []
-            self.clear_requests[message_id].append(timestamp)
-        elif command_type == "whorebot":
-            if message_id not in self.whorebot_requests:
-                self.whorebot_requests[message_id] = []
-            self.whorebot_requests[message_id].append(timestamp)
+    def add_request(self, command_type, message_id, user_id, timestamp):
+        key = (command_type, message_id)
+        self.requests.setdefault(key, []).append((user_id, timestamp))
 
-    def get_requests(self, command_type, message_id):
-        if command_type == "clear":
-            return self.clear_requests.get(message_id, [])
-        elif command_type == "whorebot":
-            return self.whorebot_requests.get(message_id, [])
-        return []
+    def get_requestors(self, command_type, message_id):
+        key = (command_type, message_id)
+        return [u for u, t in self.requests.get(key, [])]
 
     def clean_old_requests(self, command_type, message_id, current_time, time_window=600):
-        if command_type == "clear":
-            if message_id in self.clear_requests:
-                self.clear_requests[message_id] = [t for t in self.clear_requests[message_id] if current_time - t <= time_window]
-        elif command_type == "whorebot":
-            if message_id in self.whorebot_requests:
-                self.whorebot_requests[message_id] = [t for t in self.whorebot_requests[message_id] if current_time - t <= time_window]
+        key = (command_type, message_id)
+        if key in self.requests:
+            self.requests[key] = [(u, t) for (u, t) in self.requests[key] if current_time - t <= time_window]
+            if not self.requests[key]:
+                del self.requests[key]
 
 request_tracker = RequestTracker()
 
@@ -198,7 +188,7 @@ async def schedule_unmute(app: Client, chat_id: int, user_id: int, unmute_ts: in
     del_mute(chat_id, user_id)
     try:
         user = await app.get_users(user_id)
-        username = user.username
+        username = getattr(user, 'username', None)
         if username:
             await app.send_message(chat_id, f"@{username} размучен автоматически.")
         else:
@@ -231,51 +221,77 @@ async def help_handler(client, message):
     sender_id = message.from_user.id
     role = get_role(chat_id, sender_id)
     text = (
-        "Доступные команды:\n"
-        "/help — показать список команд\n"
-        "/report [сообщение] — отправить сообщение модераторам/админам/владельцам\n"
+        "Доступные команды:\n\n"
+        "/help — показать список команд\n\n"
+        "/report [сообщение] — отправить сообщение модераторам/админам/владельцам\n\n"
     )
     # общедоступные для модераторов и выше
     if role >= 1:
         text += (
-            "/kick @username [причина] — кикнуть пользователя (работает и в ответ на сообщение)\n"
-            "/mute [время] — замутить пользователя (в ответ на сообщение: /mute 1h или /mute 30m)\n"
-            "/unmute — размутить пользователя (в ответ на сообщение или /unmute @username)\n"
-            "/delete — удалить сообщение (в ответ на сообщение)\n"
-            "/clear — блокировка пользователя и удаление его сообщений\n"
-            "/шлюхобот — блокировка и отправка публичного сообщения\n"
+            "/kick @username [причина] — кикнуть пользователя (работает и в ответ на сообщение)\n\n"
+            "/mute [время] — замутить пользователя (в ответ на сообщение: /mute 1h или /mute 30m)\n\n"
+            "/unmute — размутить пользователя (в ответ на сообщение или /unmute @username)\n\n"
+            "/delete — удалить сообщение (в ответ на сообщение)\n\n"
+            "/clear — блокировка пользователя и удаление его сообщений\n\n"
+            "/шлюхобот — блокировка и отправка публичного сообщения\n\n"
         )
     if role == 1:
         text += (
-            "/clear — блокировка пользователя и удаление его сообщений (требуется подтверждение другого админа при уровне < 2)\n"
-            "/шлюхобот — блокировка и отправка публичного сообщения (требуется подтверждение другого админа при уровне < 2)\n"
+            "/clear — блокировка пользователя и удаление его сообщений (требуется подтверждение другого админа при уровне < 2)\n\n"
+            "/шлюхобот — блокировка и отправка публичного сообщения (требуется подтверждение другого админа при уровне < 2)\n\n"
         )
     elif role == 2:
-        text += "/promote @username 1 — назначить Модератора\n"
-        text += "/demote @username — снять роль Модератора\n"
+        text += "/promote @username 1 — назначить Модератора\n\n"
+        text += "/demote @username — снять роль Модератора\n\n"
     elif role == 3:
         text += (
-            "/promote @username [1-3] — назначить Модератора, Админа или Владельца\n"
-            "/demote @username — снять роль Модератора, Админа или Владельца\n"
+            "/promote @username [1-3] — назначить Модератора, Админа или Владельца\n\n"
+            "/demote @username — снять роль Модератора, Админа или Владельца\n\n"
         )
     elif role == 4:
         text += (
-            "/promote @username [1-4] — назначить любую роль\n"
-            "/demote @username — снять любую роль\n"
+            "/promote @username [1-4] — назначить любую роль\n\n"
+            "/demote @username — снять любую роль\n\n"
         )
     await message.reply(text)
 
 # ------------- ПРИВЕТСТВИЕ ПРИ ВХОДЕ -------------
 @app.on_message(filters.new_chat_members)
 async def greet_new_users(client, message):
+    greeting_path = os.path.join(RESOURCES_DIR, "greeting.jpg")
     for new_user in message.new_chat_members:
+        # Сначала отправляем приветствие в групповой чат: если есть картинка — отправляем фото, иначе текст
         try:
-            await client.send_message(new_user.id, f"Ты присоединился к чату '{message.chat.title}'. Добро пожаловать!")
+            if os.path.exists(greeting_path):
+                try:
+                    await client.send_photo(
+                        chat_id=message.chat.id,
+                        photo=greeting_path,
+                        caption=f"Добро пожаловать, {new_user.mention}!"
+                    )
+                except RPCError as e:
+                    logging.warning(f"Не удалось отправить фото-приветствие в чат: {e}")
+                    # fallback to text
+                    try:
+                        await client.send_message(message.chat.id, f"Добро пожаловать, {new_user.mention}!")
+                    except RPCError:
+                        logging.warning("Не удалось отправить текстовое приветствие в чат.")
+            else:
+                try:
+                    await client.send_message(message.chat.id, f"Добро пожаловать, {new_user.mention}!")
+                except RPCError:
+                    logging.warning("Не удалось отправить текстовое приветствие в чат.")
+        except Exception as e:
+            logging.exception(f"Ошибка при отправке группового приветствия: {e}")
+
+        # Затем, если пользователь ранее запускал бота — отправляем ЛС с гиперссылкой на чат
+        try:
+            chat_link = f"[{message.chat.title}](tg://chat?id={message.chat.id})"
+            dm_text = f"Добро пожаловать в чат {chat_link}!"
+            await client.send_message(new_user.id, dm_text, parse_mode=ParseMode.MARKDOWN)
         except RPCError:
-            await message.reply_photo(
-                photo=f"{RESOURCES_DIR}/greeting.jpg",  # относительный путь или абсолютный
-                caption=f"Добро пожаловать, {new_user.mention}! Напиши мне в ЛС, чтобы получать уведомления."
-            )
+            # пользователь не запускал бота или запретил ЛС — нормально, игнорируем
+            pass
 
 # ------------- ПАРСЕР ВРЕМЕНИ -------------
 def parse_duration(text: str) -> int:
@@ -344,7 +360,7 @@ async def report_handler(client, message):
     reporter_link = f"[{sender.first_name}](tg://user?id={sender.id})"
     reported_link = f"[{reported_user.first_name}](tg://user?id={reported_user.id})"
     header = f"{reporter_link} зарепортил(а) {reported_link}"
-    reply_msg = f"{header} > {content} Внимание: {ping_list}"
+    reply_msg = f"{header}\n> {content}\nВнимание: {ping_list}"
     await message.reply(reply_msg)
 
 # ------------- ХАНДЛЕР ДЛЯ /promote -------------
@@ -667,10 +683,10 @@ async def logs_handler(client, message):
     if not user_logs:
         await message.reply("У этого пользователя нет записей в логах.")
         return
-    text = f"Логи для {args[1]}:"
+    text = f"Логи для {args[1]}:\n"
     for time_ts, action in user_logs:
         t = datetime.fromtimestamp(time_ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        text += f"{t} — {action}"
+        text += f"{t} — {action}\n"
     try:
         await client.send_message(sender.id, text)
         await message.reply("Отправил логи в ЛС.")
@@ -683,7 +699,7 @@ async def clear_handler(client, message):
     chat_id = message.chat.id
     sender = message.from_user
     sender_role = get_role(chat_id, sender.id)
-    # теперь доступен всем с ролью >= 1
+    # доступен всем с ролью >= 1
     if sender_role < 1:
         await message.reply("Нельзя: недостаточно прав.")
         return
@@ -709,33 +725,31 @@ async def clear_handler(client, message):
             await message.reply(f"Нельзя: цель — {role_to_str(target_role)}, а вы — {role_to_str(sender_role)}.")
         return
 
-    current_time = time.time()
-    message_id = message.reply_to_message.id if message.reply_to_message else None
+    try:
+        # Попытка удалить всю историю пользователя в супергруппе (если доступно)
+        try:
+            if hasattr(client, 'delete_user_history'):
+                try:
+                    res = await client.delete_user_history(chat_id, target_user.id)
+                    logging.info(f"delete_user_history result: {res}")
+                except RPCError as e:
+                    logging.warning(f"delete_user_history failed: {e}")
+        except Exception:
+            # Не критично, продолжим к бану
+            pass
 
-    if message_id:
-        # Очистка старых запросов
-        request_tracker.clean_old_requests("clear", message_id, current_time)
+        # Попытка заблокировать с удалением сообщений (revoke_messages=True)
+        try:
+            await client.ban_chat_member(chat_id, target_user.id, revoke_messages=True)
+        except TypeError:
+            # старые версии pyrogram могут не поддерживать revoke_messages
+            await client.ban_chat_member(chat_id, target_user.id)
 
-        # Получение текущих запросов (id юзеров)
-        requestors = request_tracker.get_requestors("clear", message_id)
-
-        # Если уже есть достаточное количество запросов от разных админов, выполняем команду
-        distinct_requestors = set(requestors)
-        if len(distinct_requestors) >= 1:  # если есть хотя бы одна запись — это подтверждение
-            try:
-                await client.ban_chat_member(chat_id, target_user.id)
-                await message.reply(f"Пользователь {target_user.first_name} заблокирован и все его сообщения удалены.")
-                log_action(target_user.id, "clear (блокировка и удаление сообщений)", sender.id, chat_id)
-                return
-            except RPCError as e:
-                await message.reply(f"Не удалось выполнить операцию: {e}")
-                return
-
-        # Добавляем текущий запрос (отправителя)
-        request_tracker.add_request("clear", message_id, sender.id, current_time)
-        await message.reply("Требуется подтверждение от другого админа с доступом для выполнения этой команды.")
-    else:
-        await message.reply("Эта команда работает только в ответ на сообщение или через @username.")
+        # Сообщаем в чат
+        await message.reply(f"Пользователь {target_user.first_name} заблокирован и все его сообщения удалены.")
+        log_action(target_user.id, "clear (блокировка и удаление сообщений)", sender.id, chat_id)
+    except RPCError as e:
+        await message.reply(f"Не удалось выполнить операцию: {e}")
 
 # ------------- ХАНДЛЕР ДЛЯ /delete -------------
 @app.on_message(filters.command("delete") & filters.group & filters.reply)
@@ -746,6 +760,7 @@ async def delete_handler(client, message):
     if not message.reply_to_message:
         await message.reply("Эта команда работает только в ответ на сообщение.")
         return
+    # теперь моддеры (role>=1) могут удалять в одиночку
     if sender_role >= 1:
         try:
             await message.reply_to_message.delete()
@@ -754,14 +769,12 @@ async def delete_handler(client, message):
         except RPCError as e:
             await message.reply(f"Не удалось удалить сообщение: {e}")
     else:
-        # Для уровня доступа 1 нужно, чтобы два пользователя написали /delete на одно и то же сообщение
+        # для остальных пользователей поведение прежнее
         target_message = message.reply_to_message
         target_message_id = target_message.id
-        # Проверяем, есть ли уже запрос на удаление этого сообщения
         if not hasattr(client, 'pending_deletes'):
             client.pending_deletes = {}
         if target_message_id in client.pending_deletes:
-            # Если уже есть запрос на удаление этого сообщения, удаляем его
             try:
                 await target_message.delete()
                 await message.reply("Сообщение удалено.")
@@ -770,7 +783,6 @@ async def delete_handler(client, message):
             except RPCError as e:
                 await message.reply(f"Не удалось удалить сообщение: {e}")
         else:
-            # Добавляем запрос на удаление
             client.pending_deletes[target_message_id] = True
             await message.reply("Требуется подтверждение от другого пользователя с доступом 1 для удаления этого сообщения.")
 
@@ -780,7 +792,7 @@ async def whorebot_handler(client, message):
     chat_id = message.chat.id
     sender = message.from_user
     sender_role = get_role(chat_id, sender.id)
-    # теперь доступен всем с ролью >= 1
+    # теперь доступен всем с ролью >= 1 и без подтверждений
     if sender_role < 1:
         await message.reply("Нельзя: недостаточно прав.")
         return
@@ -805,45 +817,53 @@ async def whorebot_handler(client, message):
             await message.reply(f"Нельзя: цель — {role_to_str(target_role)}, а вы — {role_to_str(sender_role)}.")
         return
 
-    current_time = time.time()
-    message_id = message.reply_to_message.id if message.reply_to_message else None
+    try:
+        # Попытка удалить историю пользователя (если доступно)
+        try:
+            if hasattr(client, 'delete_user_history'):
+                try:
+                    res = await client.delete_user_history(chat_id, target_user.id)
+                    logging.info(f"delete_user_history result: {res}")
+                except RPCError as e:
+                    logging.warning(f"delete_user_history failed: {e}")
+        except Exception:
+            pass
 
-    if message_id:
-        # Очистка старых запросов
-        request_tracker.clean_old_requests("whorebot", message_id, current_time)
+        # Блокируем пользователя (попытка с revoke_messages)
+        try:
+            await client.ban_chat_member(chat_id, target_user.id, revoke_messages=True)
+        except TypeError:
+            await client.ban_chat_member(chat_id, target_user.id)
 
-        # Получение текущих запросов
-        requestors = request_tracker.get_requestors("whorebot", message_id)
-        distinct_requestors = set(requestors)
-
-        # Если уже есть достаточное количество запросов от разных админов, выполняем команду
-        if len(distinct_requestors) >= 1:
+        # Отправляем картинку и сообщение отчёта
+        whore_message = config.get("whore", "Сообщение не найдено в конфигурации.")
+        whore_path = os.path.join(RESOURCES_DIR, "whore.jpg")
+        if os.path.exists(whore_path):
             try:
-                await client.ban_chat_member(chat_id, target_user.id)
-                whore_message = config.get("whore", "Сообщение не найдено в конфигурации.")
-                await message.reply(whore_message)
-                log_action(target_user.id, "шлюхобот (блокировка и отправка сообщения)", sender.id, chat_id)
-                return
+                await client.send_photo(chat_id, whore_path, caption=whore_message)
             except RPCError as e:
-                await message.reply(f"Не удалось выполнить операцию: {e}")
-                return
-
-        # Добавляем текущий запрос
-        request_tracker.add_request("whorebot", message_id, sender.id, current_time)
-        await message.reply("Требуется подтверждение от другого админа с доступом для выполнения этой команды.")
-    else:
-        await message.reply("Эта команда работает только в ответ на сообщение или через @username.")
-
-# ------------- СТАРТ БОТА -----------
-if __name__ == "__main__":
-    app.start()
-    now_ts = int(time.time())
-    # Восстанавливаем незавершённые мьюты
-    for chat_id, user_id, unmute_ts in get_all_mutes():
-        if unmute_ts <= now_ts:
-            asyncio.create_task(schedule_unmute(app, chat_id, user_id, now_ts))
+                logging.warning(f"Не удалось отправить whore.jpg: {e}")
+                await message.reply(whore_message)
         else:
-            asyncio.create_task(schedule_unmute(app, chat_id, user_id, unmute_ts))
+            await message.reply(whore_message)
 
-    idle()
-    app.stop()
+        log_action(target_user.id, "шлюхобот (блокировка и отправка сообщения)", sender.id, chat_id)
+    except RPCError as e:
+        await message.reply(f"Не удалось выполнить операцию: {e}")
+
+# ------------- СТАРТ БОТА -------------
+if __name__ == "__main__":
+    try:
+        app.start()
+        now_ts = int(time.time())
+        # Восстанавливаем незавершённые мьюты
+        for chat_id, user_id, unmute_ts in get_all_mutes():
+            if unmute_ts <= now_ts:
+                asyncio.create_task(schedule_unmute(app, chat_id, user_id, now_ts))
+            else:
+                asyncio.create_task(schedule_unmute(app, chat_id, user_id, unmute_ts))
+        # Ждём остановки
+        idle()
+        app.stop()
+    except KeyboardInterrupt:
+        logging.info("Остановка бота")
