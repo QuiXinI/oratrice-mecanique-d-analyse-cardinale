@@ -39,6 +39,7 @@ with open(config_path, "r", encoding="utf-8") as f:
 
 DEFAULT_MUTE_SECONDS = config.get("default_mute_seconds", 600)
 LOG_CHAT_ID = config.get("log_chat_id", 0)
+FILE_ID = config.get("file_id", None)
 
 # ------------- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ -------------
 def init_db():
@@ -258,39 +259,36 @@ async def help_handler(client, message):
 # ------------- ПРИВЕТСТВИЕ ПРИ ВХОДЕ -------------
 @app.on_message(filters.new_chat_members)
 async def greet_new_users(client, message):
-    greeting_path = os.path.join(RESOURCES_DIR, "greeting.jpg")
     for new_user in message.new_chat_members:
-        # Сначала отправляем приветствие в групповой чат: если есть картинка — отправляем фото, иначе текст
-        try:
-            if os.path.exists(greeting_path):
-                try:
-                    await client.send_photo(
-                        chat_id=message.chat.id,
-                        photo=greeting_path,
-                        caption=f"Добро пожаловать, {new_user.mention}!"
-                    )
-                except RPCError as e:
-                    logging.warning(f"Не удалось отправить фото-приветствие в чат: {e}")
-                    # fallback to text
-                    try:
-                        await client.send_message(message.chat.id, f"Добро пожаловать, {new_user.mention}!")
-                    except RPCError:
-                        logging.warning("Не удалось отправить текстовое приветствие в чат.")
-            else:
-                try:
-                    await client.send_message(message.chat.id, f"Добро пожаловать, {new_user.mention}!")
-                except RPCError:
-                    logging.warning("Не удалось отправить текстовое приветствие в чат.")
-        except Exception as e:
-            logging.exception(f"Ошибка при отправке группового приветствия: {e}")
+        # 1) Отправляем видео-приветствие если есть FILE_ID
+        if FILE_ID:
+            try:
+                await client.send_video(
+                    chat_id=message.chat.id,
+                    video=FILE_ID,
+                    caption=f"Добро пожаловать, {new_user.mention}!"
+                )
+                continue  # если видео отправлено — переходим к следующему юзеру
+            except RPCError as e:
+                logging.warning(f"Не удалось отправить видео-приветствие: {e}")
+                # fallback — отправим текст
 
-        # Затем, если пользователь ранее запускал бота — отправляем ЛС с гиперссылкой на чат
+        # 2) fallback — текстовое приветствие
+        try:
+            await client.send_message(
+                chat_id=message.chat.id,
+                text=f"Добро пожаловать, {new_user.mention}!"
+            )
+        except RPCError:
+            logging.warning("Не удалось отправить текстовое приветствие в чат.")
+
+        # 3) Отправка личного сообщения
         try:
             chat_link = f"[{message.chat.title}](tg://chat?id={message.chat.id})"
             dm_text = f"Добро пожаловать в чат {chat_link}!"
             await client.send_message(new_user.id, dm_text, parse_mode=ParseMode.MARKDOWN)
         except RPCError:
-            # пользователь не запускал бота или запретил ЛС — нормально, игнорируем
+            # игнорируем если не удалось (пользователь не запускал бота или закрыл ЛС)
             pass
 
 # ------------- ПАРСЕР ВРЕМЕНИ -------------
