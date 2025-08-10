@@ -717,7 +717,6 @@ async def clear_handler(client, message):
         return
 
     target_role = get_role(chat_id, target_user.id)
-    # проверяем, что команда не используется против >= допуска
     if sender_role <= target_role:
         if sender_role == target_role:
             await message.reply(f"Нельзя: вы оба {role_to_str(sender_role)}.")
@@ -726,30 +725,19 @@ async def clear_handler(client, message):
         return
 
     try:
-        # Попытка удалить всю историю пользователя в супергруппе (если доступно)
-        try:
-            if hasattr(client, 'delete_user_history'):
-                try:
-                    res = await client.delete_user_history(chat_id, target_user.id)
-                    logging.info(f"delete_user_history result: {res}")
-                except RPCError as e:
-                    logging.warning(f"delete_user_history failed: {e}")
-        except Exception:
-            # Не критично, продолжим к бану
-            pass
-
-        # Попытка заблокировать с удалением сообщений (revoke_messages=True)
+        # Бан с удалением всех сообщений пользователя
         try:
             await client.ban_chat_member(chat_id, target_user.id, revoke_messages=True)
         except TypeError:
-            # старые версии pyrogram могут не поддерживать revoke_messages
+            # если старый pyrogram без revoke_messages
             await client.ban_chat_member(chat_id, target_user.id)
 
-        # Сообщаем в чат
         await message.reply(f"Пользователь {target_user.first_name} заблокирован и все его сообщения удалены.")
-        log_action(target_user.id, "clear (блокировка и удаление сообщений)", sender.id, chat_id)
+        log_action(target_user.id, "clear (бан + удаление сообщений)", sender.id, chat_id)
+
     except RPCError as e:
         await message.reply(f"Не удалось выполнить операцию: {e}")
+
 
 # ------------- ХАНДЛЕР ДЛЯ /delete -------------
 @app.on_message(filters.command("delete") & filters.group & filters.reply)
@@ -787,26 +775,25 @@ async def delete_handler(client, message):
             await message.reply("Требуется подтверждение от другого пользователя с доступом 1 для удаления этого сообщения.")
 
 # ------------- ХАНДЛЕР ДЛЯ /шлюхобот -------------
-@app.on_message(filters.command("шлюхобот") & filters.group)
+@app.on_message(filters.command("шлюхобот") & filters.group & filters.reply)
 async def whorebot_handler(client, message):
     chat_id = message.chat.id
     sender = message.from_user
     sender_role = get_role(chat_id, sender.id)
-    # теперь доступен всем с ролью >= 1 и без подтверждений
+    # доступен всем с ролью >= 1
     if sender_role < 1:
         await message.reply("Нельзя: недостаточно прав.")
         return
 
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-    elif len(message.text.split()) >= 2 and message.text.split()[1].startswith("@"):
-        try:
-            target_user = await client.get_users(message.text.split()[1])
-        except RPCError:
-            await message.reply("Не могу найти пользователя.")
-            return
-    else:
-        await message.reply("Используй: в ответ на сообщение или /шлюхобот @username.")
+    # обязательно в ответ на сообщение
+    if not message.reply_to_message:
+        await message.reply("Эта команда работает только в ответ на сообщение.")
+        return
+
+    target_msg = message.reply_to_message
+    target_user = target_msg.from_user
+    if not target_user:
+        await message.reply("Не могу определить автора сообщения.")
         return
 
     target_role = get_role(chat_id, target_user.id)
@@ -818,38 +805,39 @@ async def whorebot_handler(client, message):
         return
 
     try:
-        # Попытка удалить историю пользователя (если доступно)
+        # Попытка удалить само целевое сообщение (не важная операция — если упадёт, продолжим)
         try:
-            if hasattr(client, 'delete_user_history'):
-                try:
-                    res = await client.delete_user_history(chat_id, target_user.id)
-                    logging.info(f"delete_user_history result: {res}")
-                except RPCError as e:
-                    logging.warning(f"delete_user_history failed: {e}")
-        except Exception:
-            pass
+            await target_msg.delete()
+        except RPCError as e:
+            logging.warning(f"Не удалось удалить целевое сообщение: {e}")
 
-        # Блокируем пользователя (попытка с revoke_messages)
+        # Баним пользователя и удаляем его видимые сообщения (revoke_messages=True, если поддерживается)
         try:
             await client.ban_chat_member(chat_id, target_user.id, revoke_messages=True)
         except TypeError:
+            # Если версия pyrogram не поддерживает revoke_messages
             await client.ban_chat_member(chat_id, target_user.id)
 
-        # Отправляем картинку и сообщение отчёта
+        # Отправляем отчёт: картинка resources/whore.jpg + текст из config["whore"]
         whore_message = config.get("whore", "Сообщение не найдено в конфигурации.")
         whore_path = os.path.join(RESOURCES_DIR, "whore.jpg")
-        if os.path.exists(whore_path):
-            try:
+        try:
+            if os.path.exists(whore_path):
                 await client.send_photo(chat_id, whore_path, caption=whore_message)
-            except RPCError as e:
-                logging.warning(f"Не удалось отправить whore.jpg: {e}")
+            else:
+                await client.send_message(chat_id, whore_message)
+            log_action(target_user.id, "шлюхобот (бан и отправка отчёта)", sender.id, chat_id)
+        except RPCError as e:
+            logging.warning(f"Не удалось отправить whore-отчёт: {e}")
+            # Попытка упрощённого ответа, чтобы хоть что-то было видно
+            try:
                 await message.reply(whore_message)
-        else:
-            await message.reply(whore_message)
+            except RPCError:
+                pass
 
-        log_action(target_user.id, "шлюхобот (блокировка и отправка сообщения)", sender.id, chat_id)
     except RPCError as e:
         await message.reply(f"Не удалось выполнить операцию: {e}")
+
 
 # ------------- СТАРТ БОТА -------------
 if __name__ == "__main__":
