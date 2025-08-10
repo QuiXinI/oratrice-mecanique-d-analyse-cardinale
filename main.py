@@ -836,7 +836,6 @@ async def whorebot_handler(client, message):
     except RPCError as e:
         await message.reply(f"Не удалось выполнить операцию: {e}")
 
-
 # ------------- СТАРТ БОТА -------------
 if __name__ == "__main__":
     try:
