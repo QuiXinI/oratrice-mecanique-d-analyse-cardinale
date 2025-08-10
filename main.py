@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from pyrogram import Client, filters, idle
+from pyrogram import Client, filters
 from pyrogram.types import ChatPermissions
 from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
@@ -79,26 +79,36 @@ def init_db():
 # Создаём или открываем БД
 conn = init_db()
 
-# Класс для отслеживания запросов (на подтверждение действий)
+# Класс для отслеживания запросов
 class RequestTracker:
     def __init__(self):
-        # структура: { (command_type, message_id) : [ (user_id, timestamp), ... ] }
-        self.requests = {}
+        self.clear_requests = {}
+        self.whorebot_requests = {}
 
-    def add_request(self, command_type, message_id, user_id, timestamp):
-        key = (command_type, message_id)
-        self.requests.setdefault(key, []).append((user_id, timestamp))
+    def add_request(self, command_type, message_id, timestamp):
+        if command_type == "clear":
+            if message_id not in self.clear_requests:
+                self.clear_requests[message_id] = []
+            self.clear_requests[message_id].append(timestamp)
+        elif command_type == "whorebot":
+            if message_id not in self.whorebot_requests:
+                self.whorebot_requests[message_id] = []
+            self.whorebot_requests[message_id].append(timestamp)
 
-    def get_requestors(self, command_type, message_id):
-        key = (command_type, message_id)
-        return [u for u, t in self.requests.get(key, [])]
+    def get_requests(self, command_type, message_id):
+        if command_type == "clear":
+            return self.clear_requests.get(message_id, [])
+        elif command_type == "whorebot":
+            return self.whorebot_requests.get(message_id, [])
+        return []
 
     def clean_old_requests(self, command_type, message_id, current_time, time_window=600):
-        key = (command_type, message_id)
-        if key in self.requests:
-            self.requests[key] = [(u, t) for (u, t) in self.requests[key] if current_time - t <= time_window]
-            if not self.requests[key]:
-                del self.requests[key]
+        if command_type == "clear":
+            if message_id in self.clear_requests:
+                self.clear_requests[message_id] = [t for t in self.clear_requests[message_id] if current_time - t <= time_window]
+        elif command_type == "whorebot":
+            if message_id in self.whorebot_requests:
+                self.whorebot_requests[message_id] = [t for t in self.whorebot_requests[message_id] if current_time - t <= time_window]
 
 request_tracker = RequestTracker()
 
@@ -188,7 +198,7 @@ async def schedule_unmute(app: Client, chat_id: int, user_id: int, unmute_ts: in
     del_mute(chat_id, user_id)
     try:
         user = await app.get_users(user_id)
-        username = getattr(user, 'username', None)
+        username = user.username
         if username:
             await app.send_message(chat_id, f"@{username} размучен автоматически.")
         else:
